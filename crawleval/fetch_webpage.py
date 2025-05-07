@@ -1,7 +1,7 @@
 """
 Web Page Fetcher Module
 
-This module provides functionality to fetch web pages using DrissionPage,
+This module provides functionality to fetch web pages using Selenium,
 analyze their content, and save both the HTML and metadata for later evaluation.
 
 Features:
@@ -68,13 +68,17 @@ from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup, Comment, Declaration, Doctype
-from DrissionPage import ChromiumOptions, ChromiumPage
 from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
 from rich.progress import Progress, TaskID
 from rich.table import Table
 from rich.theme import Theme
+from selenium import webdriver
+from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.support.ui import WebDriverWait
 
 from crawleval.models import (
     BatchProcessingResults,
@@ -222,8 +226,13 @@ class TaskManager:
 
 
 class WebPageFetcher:
-    def __init__(self, base_dir):
-        """Initialize the fetcher with directory paths"""
+    def __init__(self, base_dir, chrome_path: Optional[str] = None):
+        """Initialize the fetcher with directory paths
+
+        Args:
+            base_dir: Base directory for storing data
+            chrome_path: Optional path to Chrome executable
+        """
         self.base_dir = Path(base_dir)
         self.html_dir = self.base_dir / "html"
         self.metadata_dir = self.base_dir / "metadata"
@@ -234,6 +243,7 @@ class WebPageFetcher:
         self.hash_index_path = self.base_dir / "hash_index.json"
         self.url_index_path = self.base_dir / "url_index.json"
         self.logs_dir = self.base_dir / "task_logs"
+        self.chrome_path = chrome_path
 
         # Create directories if they don't exist
         self.html_dir.mkdir(parents=True, exist_ok=True)
@@ -489,7 +499,7 @@ class WebPageFetcher:
                 # Combine all file IDs from all directories
                 all_files = html_files + metadata_files + screenshot_files
                 ids = [int(f.stem) for f in all_files if f.stem.isdigit()]
-                self.current_id = max(ids)
+                self.current_id = max(ids) if ids else 0
 
             # Increment the ID for the next file
             self.current_id += 1
@@ -535,7 +545,7 @@ class WebPageFetcher:
         html_content = page_data.html
         soup = BeautifulSoup(html_content, "html.parser")
 
-        # Extract basic metadata (use DrissionPage title if available)
+        # Extract basic metadata
         title = (
             page_data.title
             if page_data.title
@@ -582,7 +592,7 @@ class WebPageFetcher:
         url = page_data.url
         metadata = PageMetadata(
             id=file_id,
-            name=title[:50],  # Truncate long titles
+            name=title[:500],
             description=f"Content from {urlparse(url).netloc}",
             url=url,
             size=len(html_content),
@@ -810,22 +820,22 @@ class WebPageFetcher:
         return result
 
     def fetch_html(self, url: str) -> PageData | None:
-        """Fetch HTML content from a URL using DrissionPage
+        """Fetch HTML content from a URL using Selenium
 
         Args:
             url: The URL to fetch
         """
-        page = None
+        driver = None
         try:
             # Create a fresh browser instance
-            page = self.setup_page()
-            if not page:
+            driver = self.setup_page(chrome_path=self.chrome_path)
+            if not driver:
                 self.task_manager.add_log(url, "Failed to create browser", "error")
                 return None
 
             self.task_manager.update_task(url, progress=10)
             self.task_manager.add_log(url, f"Navigating to {url}...", "info")
-            page.get(url)
+            driver.get(url)
             self.task_manager.update_task(url, progress=30)
 
             # Wait for page to load using dynamic waiting strategy
@@ -835,9 +845,12 @@ class WebPageFetcher:
             self.task_manager.update_task(url, progress=40)
             try:
                 # Wait for document ready state to be complete
-                page.wait.doc_loaded(timeout=10)
+                WebDriverWait(driver, 10).until(
+                    lambda d: d.execute_script("return document.readyState")
+                    == "complete"
+                )
                 self.task_manager.update_task(url, progress=60)
-            except Exception as e:
+            except TimeoutException as e:
                 self.task_manager.add_log(
                     url, f"Warning: Wait condition timed out: {e}", "warning"
                 )
@@ -848,17 +861,17 @@ class WebPageFetcher:
                 )
 
             # Get page source after JavaScript execution
-            html_content = page.html
+            html_content = driver.page_source
             self.task_manager.update_task(url, progress=70)
 
             # Take a screenshot of the page
             self.task_manager.add_log(url, "Taking screenshot...", "info")
-            screenshot_data = page.get_screenshot(as_bytes=True)
-            self.task_manager.update_task(url, progress=0.8)
+            screenshot_data = driver.get_screenshot_as_png()
+            self.task_manager.update_task(url, progress=80)
 
             # Additional page metadata
-            page_title = page.title
-            current_url = page.url  # In case of redirects
+            page_title = driver.title
+            current_url = driver.current_url  # In case of redirects
             self.task_manager.update_task(url, progress=90)
 
             page_data = PageData(
@@ -875,9 +888,9 @@ class WebPageFetcher:
             return None
         finally:
             # Always close the browser when done
-            if page:
+            if driver:
                 try:
-                    page.quit()
+                    driver.quit()
                 except Exception:
                     self.task_manager.add_log(
                         url, "Warning: Failed to close browser properly", "warning"
@@ -1050,9 +1063,6 @@ class WebPageFetcher:
                         # Final update of the display
                         live.update(self._generate_live_display(running_progress))
 
-            # Print summary with rich tables
-            from rich.table import Table
-
             console.print("\n[bold cyan]Batch processing completed[/bold cyan]")
 
             # Create summary table
@@ -1072,7 +1082,8 @@ class WebPageFetcher:
         except Exception as e:
             console.print(f"Error during batch processing: {e}", style="error")
 
-        return results
+        finally:
+            return results
 
     def _generate_live_display(self, running_progress: Progress):
         """Generate a rich layout for the live display with a combined panel"""
@@ -1103,8 +1114,11 @@ class WebPageFetcher:
         if running_tasks:
             for task in running_tasks:
                 if task.progress_task_id is None:
+                    task_url_text = (
+                        task.url if len(task.url) <= 40 else task.url[:37] + "..."
+                    )
                     task_id = running_progress.add_task(
-                        f"[bold blue]{task.url}",
+                        f"[bold blue]{task_url_text}",
                         completed=task.progress,
                     )
                     self.task_manager.update_task(task.url, progress_task_id=task_id)
@@ -1129,39 +1143,52 @@ class WebPageFetcher:
         )
 
     @staticmethod
-    def setup_page():
-        """Set up and return a DrissionPage ChromiumPage instance"""
-        # Create options object with sensible defaults
-        options = ChromiumOptions()
+    def setup_page(chrome_path: Optional[str] = None):
+        """Set up and return a Selenium WebDriver instance
 
-        # Set headless mode
-        options.headless()
-
-        # Set user agent
-        options.set_user_agent(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        )
-
-        # Add browser arguments for stability
-        options.set_argument("--no-sandbox")
-        options.set_argument("--disable-dev-shm-usage")
-        options.set_argument("--disable-gpu")
-        options.set_argument("--window-size=1920,1080")
-        options.set_argument("--disable-extensions")
-
+        Args:
+            chrome_path: Optional path to Chrome executable. If not provided,
+                        will use system's default Chrome installation.
+        """
         try:
-            # Create page with options
-            page = ChromiumPage(options)
-            return page
+            # Create Chrome options
+            options = Options()
+
+            # Set headless mode
+            options.add_argument("--headless=new")
+
+            # Set user agent
+            options.add_argument(
+                "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            )
+
+            # Add browser arguments for stability
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--disable-gpu")
+            options.add_argument("--window-size=1920,1080")
+            options.add_argument("--disable-extensions")
+
+            # Set Chrome binary location if provided
+            if chrome_path:
+                options.binary_location = chrome_path
+
+            # Create Chrome service
+            service = Service()
+
+            # Create and return the WebDriver instance
+            driver = webdriver.Chrome(service=service, options=options)
+            return driver
+
         except Exception as e:
             print(f"Failed to create browser: {e}")
-            print("Make sure Chrome and DrissionPage are installed properly.")
+            print("Make sure Chrome and ChromeDriver are installed properly.")
             return None
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Fetch website content in batch mode using DrissionPage and generate metadata"
+        description="Fetch website content in batch mode using Selenium and generate metadata"
     )
     parser.add_argument(
         "--batch",
@@ -1171,10 +1198,15 @@ def main():
     )
     parser.add_argument(
         "--dir",
-        default=os.path.join(
-            os.path.abspath(os.path.dirname(__file__)), "..", "eval_data_extract"
+        default=os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "eval_data_extract")
         ),
         help="Base directory (default: <project_root>/eval_data_extract)",
+    )
+    parser.add_argument(
+        "--chrome-path",
+        metavar="PATH",
+        help="Path to Chrome executable (if not using system default)",
     )
     parser.add_argument(
         "--list-hashes",
@@ -1205,10 +1237,9 @@ def main():
     )
 
     args = parser.parse_args()
-    fetcher = WebPageFetcher(args.dir)
+    fetcher = WebPageFetcher(args.dir, chrome_path=args.chrome_path)
 
     # Display Rich banner
-
     console.print(
         Panel.fit(
             "[bold cyan]Web Page Fetcher[/bold cyan]\n"
@@ -1243,6 +1274,8 @@ def main():
     )
     console.print(f"[info]Using [bold]{args.workers}[/bold] workers[/info]")
     console.print(f"[info]Saving to directory: [/info][cyan]{args.dir}[/cyan]")
+    if args.chrome_path:
+        console.print(f"[info]Using Chrome at: [/info][cyan]{args.chrome_path}[/cyan]")
 
     results = fetcher.batch_process_urls(
         args.batch,

@@ -4,4 +4,3 @@ eval_data_extract/hash_index.json filter=lfs diff=lfs merge=lfs -text
 eval_data_extract/url_index.json filter=lfs diff=lfs merge=lfs -text
 eval_data_extract/ground_truth/patterns/* filter=lfs diff=lfs merge=lfs -text
 eval_data_extract/ground_truth/data/* filter=lfs diff=lfs merge=lfs -text
-eval_data_extract/screenshots/*.png filter=lfs diff=lfs merge=lfs -text

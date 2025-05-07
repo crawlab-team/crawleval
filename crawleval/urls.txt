@@ -1,7 +1,19 @@
+# Basic
 https://quotes.toscrape.com
 https://books.toscrape.com
-https://github.com/trending
+
+# E-Commerce
 https://www.amazon.com/s?k=iphone
 https://www.amazon.com/soyizpo-I16-ProMax-Smartphone-Fingerprint/dp/B0DLX41W6M
+https://www.ebay.com/b/TV-Video-Home-Audio-Electronics/32852/bn_1648392
+https://www.ebay.com/b/TVs/11071/bn_738302
+https://www.ebay.com/itm/135565215791
+https://detail.tmall.com/item.htm?id=727376248905&sku_properties=5919063%3A6536025
+
+# News
+https://www.bbc.com/innovation/artificial-intelligence
 https://www.bbc.com/news/articles/cwy603eg0w8o
+
+# Tech
+https://github.com/trending
 https://huggingface.co/datasets
