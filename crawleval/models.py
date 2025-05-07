@@ -1,5 +1,5 @@
 from datetime import UTC, datetime
-from typing import Dict, List, Literal, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -9,6 +9,7 @@ class PageData(BaseModel):
     title: str
     url: str
     screenshot: Optional[bytes] = None
+    file_id: Optional[str] = None
 
 
 class PageMetadata(BaseModel):
@@ -51,8 +52,11 @@ class PageGroundTruth(BaseModel):
 
 class UrlProcessResult(BaseModel):
     """Result of processing a single URL"""
+
     url: str
-    status: Literal["success", "duplicate_url", "duplicate_content", "failed", "error", "unknown"]
+    status: Literal[
+        "success", "duplicate_url", "duplicate_content", "failed", "error", "unknown"
+    ]
     file_id: Optional[str] = None
     is_new: bool = False
     error: Optional[str] = None
@@ -60,6 +64,7 @@ class UrlProcessResult(BaseModel):
 
 class BatchProcessingResults(BaseModel):
     """Summary of batch processing results"""
+
     total: int = 0
     successful: int = 0
     failed: int = 0

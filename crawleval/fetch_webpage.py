@@ -57,6 +57,7 @@ with # are ignored (useful for commenting out URLs).
 import argparse
 import hashlib
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -68,18 +69,10 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup, Comment, Declaration, Doctype
 from DrissionPage import ChromiumOptions, ChromiumPage
-from rich.console import Console
-from rich.layout import Layout
+from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
-from rich.progress import (
-    BarColumn,
-    Progress,
-    SpinnerColumn,
-    TaskProgressColumn,
-    TextColumn,
-    TimeRemainingColumn,
-)
+from rich.progress import Progress, TaskID
 from rich.table import Table
 from rich.theme import Theme
 
@@ -120,18 +113,31 @@ class TaskInfo:
 
     url: str
     state: TaskState = TaskState.QUEUED
-    progress: float = 0.0
+    progress: int = 0
     message: str = ""
     file_id: Optional[str] = None
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
     logs: List[str] = field(default_factory=list)
+    log_file: Optional[str] = None
+    progress_task_id: Optional[TaskID] = None
 
     def add_log(self, message: str, log_type: str = "info"):
         """Add a log message with timestamp"""
         timestamp = time.strftime("%H:%M:%S")
         log_entry = f"[dim][{timestamp}][/dim] [{log_type}]{message}[/{log_type}]"
         self.logs.append(log_entry)
+
+        # Also write to log file if available
+        if self.log_file and os.path.exists(os.path.dirname(self.log_file)):
+            try:
+                with open(self.log_file, "a", encoding="utf-8") as f:
+                    # Strip rich formatting for file logs
+                    clean_message = re.sub(r"\[.*?\]", "", log_entry)
+                    f.write(f"{clean_message}\n")
+            except Exception as e:
+                # Don't let logging errors affect the main process
+                print(f"Error writing to log file: {e}")
 
     def get_recent_logs(self, count: int = 3) -> List[str]:
         """Get the most recent logs"""
@@ -141,15 +147,48 @@ class TaskInfo:
 class TaskManager:
     """Manages task state for Rich UI display"""
 
-    def __init__(self):
+    def __init__(self, logs_dir=None):
         self.tasks: Dict[str, TaskInfo] = {}
         self.lock = threading.Lock()
+        self.logs_dir = logs_dir
+
+        # Create logs directory if specified
+        if logs_dir:
+            os.makedirs(logs_dir, exist_ok=True)
 
     def add_task(self, url: str) -> str:
         """Add a new task and return its ID (URL)"""
         with self.lock:
-            self.tasks[url] = TaskInfo(url=url)
+            task = TaskInfo(url=url)
+
+            # Set up log file if logs directory is available
+            if self.logs_dir:
+                # Create a safe filename from the URL
+                safe_filename = self._get_safe_filename(url)
+                log_file = os.path.join(self.logs_dir, f"{safe_filename}.log")
+                task.log_file = log_file
+
+                # Initialize the log file
+                try:
+                    with open(log_file, "w", encoding="utf-8") as f:
+                        f.write(f"=== Task log for URL: {url} ===\n")
+                        f.write(f"Started at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                except Exception as e:
+                    print(f"Error creating log file: {e}")
+
+            self.tasks[url] = task
         return url
+
+    @staticmethod
+    def _get_safe_filename(url: str) -> str:
+        """Convert URL to a safe filename"""
+        # Remove protocol and special characters
+        safe_name = re.sub(r"^https?://", "", url)
+        safe_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", safe_name)
+        # Trim if too long
+        if len(safe_name) > 100:
+            safe_name = safe_name[:97] + "..."
+        return safe_name
 
     def update_task(self, url: str, **kwargs):
         """Update a task's properties"""
@@ -194,6 +233,7 @@ class WebPageFetcher:
         self.ground_truth_data_dir = self.ground_truth_dir / "data"
         self.hash_index_path = self.base_dir / "hash_index.json"
         self.url_index_path = self.base_dir / "url_index.json"
+        self.logs_dir = self.base_dir / "task_logs"
 
         # Create directories if they don't exist
         self.html_dir.mkdir(parents=True, exist_ok=True)
@@ -202,6 +242,7 @@ class WebPageFetcher:
         self.ground_truth_dir.mkdir(parents=True, exist_ok=True)
         self.ground_truth_patterns_dir.mkdir(parents=True, exist_ok=True)
         self.ground_truth_data_dir.mkdir(parents=True, exist_ok=True)
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
 
         # Initialize hash index
         self.hash_index = self._load_hash_index()
@@ -215,7 +256,10 @@ class WebPageFetcher:
         self.file_id_lock = threading.Lock()
 
         # Task manager for UI
-        self.task_manager = TaskManager()
+        self.task_manager = TaskManager(logs_dir=self.logs_dir)
+
+        # ID for the current file being processed
+        self.current_id = None
 
     def _load_hash_index(self):
         """Load existing hash index or create a new one"""
@@ -436,118 +480,57 @@ class WebPageFetcher:
     def get_next_id(self):
         """Get the next available ID for files (in format '0001', '0002', etc.)"""
         with self.file_id_lock:
-            html_files = list(self.html_dir.glob("*.html"))
-            ids = [int(f.stem) for f in html_files if f.stem.isdigit()]
-            return f"{max(ids + [0]) + 1:04d}" if ids else "0001"
+            # Check if we already have a current ID
+            if not self.current_id:
+                html_files = list(self.html_dir.glob("*.html"))
+                metadata_files = list(self.metadata_dir.glob("*.json"))
+                screenshot_files = list(self.screenshots_dir.glob("*.png"))
+
+                # Combine all file IDs from all directories
+                all_files = html_files + metadata_files + screenshot_files
+                ids = [int(f.stem) for f in all_files if f.stem.isdigit()]
+                self.current_id = max(ids)
+
+            # Increment the ID for the next file
+            self.current_id += 1
+
+            return f"{self.current_id:04d}"
+
+    def _save_files_internal(
+        self, page_data: PageData, metadata: PageMetadata, url: str
+    ):
+        """Internal method to save files using pre-generated file ID"""
+        html_content = page_data.html
+        screenshot_data = page_data.screenshot
+        file_id = metadata.id
+
+        # Save HTML file
+        html_path = self.html_dir / f"{file_id}.html"
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(html_content)
+
+        # Save screenshot file (if available)
+        screenshot_path = None
+        if screenshot_data:
+            screenshot_path = self.screenshots_dir / f"{file_id}.png"
+            with open(screenshot_path, "wb") as f:
+                f.write(screenshot_data)
+
+        # Save metadata file
+        metadata_path = self.metadata_dir / f"{file_id}.json"
+        with open(metadata_path, "w", encoding="utf-8") as f:
+            f.write(metadata.model_dump_json(indent=2))
+
+        self.task_manager.add_log(url, "Files created successfully:", "success")
+        self.task_manager.add_log(url, f"  HTML: {html_path}", "info")
+        if screenshot_path:
+            self.task_manager.add_log(url, f"  Screenshot: {screenshot_path}", "info")
+        self.task_manager.add_log(url, f"  Metadata: {metadata_path}", "info")
+
+        return file_id
 
     @staticmethod
-    def setup_page():
-        """Set up and return a DrissionPage ChromiumPage instance"""
-        # Create options object with sensible defaults
-        options = ChromiumOptions()
-
-        # Set headless mode
-        options.headless()
-
-        # Set user agent
-        options.set_user_agent(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        )
-
-        # Add browser arguments for stability
-        options.set_argument("--no-sandbox")
-        options.set_argument("--disable-dev-shm-usage")
-        options.set_argument("--disable-gpu")
-        options.set_argument("--window-size=1920,1080")
-        options.set_argument("--disable-extensions")
-
-        try:
-            # Create page with options
-            page = ChromiumPage(options)
-            return page
-        except Exception as e:
-            print(f"Failed to create browser: {e}")
-            print("Make sure Chrome and DrissionPage are installed properly.")
-            return None
-
-    def fetch_html(self, url: str, task_url: str) -> PageData | None:
-        """Fetch HTML content from a URL using DrissionPage
-
-        Args:
-            url: The URL to fetch
-            task_url: The original URL for task tracking
-        """
-        page = None
-        try:
-            # Create a fresh browser instance
-            page = self.setup_page()
-            if not page:
-                self.task_manager.add_log(task_url, "Failed to create browser", "error")
-                return None
-
-            self.task_manager.update_task(task_url, progress=0.1)
-            self.task_manager.add_log(task_url, f"Navigating to {url}...", "info")
-            page.get(url)
-            self.task_manager.update_task(task_url, progress=0.3)
-
-            # Wait for page to load using dynamic waiting strategy
-            self.task_manager.add_log(
-                task_url, "Waiting for page to fully render...", "info"
-            )
-            self.task_manager.update_task(task_url, progress=0.4)
-            try:
-                # Wait for document ready state to be complete
-                page.wait.doc_loaded(timeout=10)
-                self.task_manager.update_task(task_url, progress=0.6)
-            except Exception as e:
-                self.task_manager.add_log(
-                    task_url, f"Warning: Wait condition timed out: {e}", "warning"
-                )
-                self.task_manager.add_log(
-                    task_url,
-                    "Continuing with potentially incomplete page...",
-                    "warning",
-                )
-
-            # Get page source after JavaScript execution
-            html_content = page.html
-            self.task_manager.update_task(task_url, progress=0.7)
-
-            # Take a screenshot of the page
-            self.task_manager.add_log(task_url, "Taking screenshot...", "info")
-            screenshot_data = page.get_screenshot(as_bytes=True)
-            self.task_manager.update_task(task_url, progress=0.8)
-
-            # Additional page metadata
-            page_title = page.title
-            current_url = page.url  # In case of redirects
-            self.task_manager.update_task(task_url, progress=0.9)
-
-            page_data = PageData(
-                html=html_content,
-                title=page_title,
-                url=current_url,
-                screenshot=screenshot_data,
-            )
-
-            self.task_manager.update_task(task_url, progress=1.0)
-            return page_data
-        except Exception as e:
-            self.task_manager.add_log(
-                task_url, f"Error fetching URL {url}: {e}", "error"
-            )
-            return None
-        finally:
-            # Always close the browser when done
-            if page:
-                try:
-                    page.quit()
-                except Exception:
-                    self.task_manager.add_log(
-                        task_url, "Warning: Failed to close browser properly", "warning"
-                    )
-
-    def analyze_html(self, page_data: PageData) -> PageMetadata:
+    def analyze_html(page_data: PageData, file_id: str) -> PageMetadata:
         """Analyze HTML to extract metadata"""
         html_content = page_data.html
         soup = BeautifulSoup(html_content, "html.parser")
@@ -598,7 +581,7 @@ class WebPageFetcher:
         # Generate metadata
         url = page_data.url
         metadata = PageMetadata(
-            id=self.get_next_id(),
+            id=file_id,
             name=title[:50],  # Truncate long titles
             description=f"Content from {urlparse(url).netloc}",
             url=url,
@@ -612,42 +595,8 @@ class WebPageFetcher:
 
         return metadata
 
-    def save_files(self, page_data: PageData, metadata: PageMetadata, task_url: str):
-        """Save HTML content, screenshot, and metadata files"""
-        html_content = page_data.html
-        screenshot_data = page_data.screenshot
-        file_id = metadata.id
-
-        # Save HTML file
-        html_path = self.html_dir / f"{file_id}.html"
-        with open(html_path, "w", encoding="utf-8") as f:
-            f.write(html_content)
-
-        # Save screenshot file (if available)
-        screenshot_path = None
-        if screenshot_data:
-            screenshot_path = self.screenshots_dir / f"{file_id}.png"
-            with open(screenshot_path, "wb") as f:
-                f.write(screenshot_data)
-
-        # Save metadata file
-        metadata_path = self.metadata_dir / f"{file_id}.json"
-        with open(metadata_path, "w", encoding="utf-8") as f:
-            f.write(metadata.model_dump_json(indent=2))
-
-        self.task_manager.add_log(task_url, "Files created successfully:", "success")
-        self.task_manager.add_log(task_url, f"  HTML: {html_path}", "info")
-        if screenshot_path:
-            self.task_manager.add_log(
-                task_url, f"  Screenshot: {screenshot_path}", "info"
-            )
-        self.task_manager.add_log(task_url, f"  Metadata: {metadata_path}", "info")
-
-        return file_id
-
     def list_hashes(self):
         """List all content hashes and their corresponding file IDs"""
-        from rich.table import Table
 
         if not self.hash_index:
             console.print(
@@ -684,7 +633,6 @@ class WebPageFetcher:
 
     def list_urls(self):
         """List all URLs and their corresponding file IDs"""
-        from rich.table import Table
 
         if not self.url_index:
             console.print(
@@ -713,13 +661,12 @@ class WebPageFetcher:
 
         console.print(table)
 
-    def process_single_url(self, url: str) -> UrlProcessResult:
+    def _process_single_url(self, url: str) -> UrlProcessResult:
         """Process a single URL and return the result"""
-        task_url = url
-        self.task_manager.add_task(task_url)
         self.task_manager.update_task(
-            task_url, state=TaskState.RUNNING, started_at=time.time()
+            url, state=TaskState.RUNNING, started_at=time.time()
         )
+        self.task_manager.add_log(url, f"Starting to process URL: {url}", "info")
 
         result = UrlProcessResult(url=url, status="unknown")
         retry_count = 0
@@ -730,87 +677,115 @@ class WebPageFetcher:
                 # First check URL duplication (we already filtered, but double-check)
                 url_duplicate_id = self._check_url_duplicate(url)
                 if url_duplicate_id:
+                    self.task_manager.add_log(
+                        url, f"Found duplicate URL with ID: {url_duplicate_id}", "info"
+                    )
                     result.status = "duplicate_url"
                     result.file_id = url_duplicate_id
                     result.is_new = False
                     self.task_manager.update_task(
-                        task_url,
+                        url,
                         state=TaskState.COMPLETE,
                         file_id=url_duplicate_id,
                         progress=1.0,
                         message="Duplicate URL detected",
                         completed_at=time.time(),
                     )
+                    self.task_manager.add_log(
+                        url, "Task completed as duplicate URL", "success"
+                    )
                     return result
 
                 # Fetch the content with a fresh browser for each URL
-                page_data = self.fetch_html(url, task_url)
+                self.task_manager.add_log(url, "Fetching HTML content...", "info")
+                page_data = self.fetch_html(url)
                 if not page_data:
                     if retry_count < max_retries:
                         retry_count += 1
                         self.task_manager.add_log(
-                            task_url,
+                            url,
                             f"Retrying {url} (attempt {retry_count}/{max_retries})",
                             "warning",
                         )
                         continue
                     result.status = "failed"
                     self.task_manager.update_task(
-                        task_url,
+                        url,
                         state=TaskState.FAILED,
                         progress=1.0,
                         message="Failed to fetch content",
                         completed_at=time.time(),
                     )
+                    self.task_manager.add_log(
+                        url, "Task failed: Could not fetch content", "error"
+                    )
                     return result
 
                 # Check content duplication
+                self.task_manager.add_log(
+                    url, "Checking for duplicate content...", "info"
+                )
                 content_duplicate_id = self._check_duplicate(page_data.html)
                 if content_duplicate_id:
+                    self.task_manager.add_log(
+                        url,
+                        f"Found duplicate content with ID: {content_duplicate_id}",
+                        "info",
+                    )
                     # Use a lock to avoid race conditions when updating shared data
                     self._register_url(url, content_duplicate_id)
                     result.status = "duplicate_content"
                     result.file_id = content_duplicate_id
                     result.is_new = False
                     self.task_manager.update_task(
-                        task_url,
+                        url,
                         state=TaskState.COMPLETE,
                         file_id=content_duplicate_id,
                         progress=1.0,
                         message="Duplicate content detected",
                         completed_at=time.time(),
                     )
+                    self.task_manager.add_log(
+                        url, "Task completed as duplicate content", "success"
+                    )
                     return result
 
                 # Process as new content
-                metadata = self.analyze_html(page_data)
-                file_id = self.save_files(page_data, metadata, task_url)
+                self.task_manager.add_log(
+                    url, "Analyzing and saving content...", "info"
+                )
+                metadata, file_id = self.analyze_and_save_content(page_data, url)
+                self.task_manager.add_log(
+                    url, f"Content saved with ID: {file_id}", "success"
+                )
 
                 # Use locks to prevent race conditions when updating shared data
                 self._register_hash(page_data.html, file_id)
                 self._register_url(url, file_id)
+                self.task_manager.add_log(
+                    url, "URL and hash registered in indexes", "info"
+                )
 
                 result.status = "success"
                 result.file_id = file_id
                 result.is_new = True
                 self.task_manager.update_task(
-                    task_url,
+                    url,
                     state=TaskState.COMPLETE,
                     file_id=file_id,
                     progress=1.0,
                     message="Successfully processed",
                     completed_at=time.time(),
                 )
+                self.task_manager.add_log(url, "Task completed successfully", "success")
                 return result
 
             except Exception as e:
+                self.task_manager.add_log(url, f"Error processing {url}: {e}", "error")
                 if retry_count < max_retries:
                     retry_count += 1
                     self.task_manager.add_log(
-                        task_url, f"Error processing {url}: {e}", "error"
-                    )
-                    self.task_manager.add_log(
-                        task_url,
+                        url,
                         f"Retrying (attempt {retry_count}/{max_retries})",
                         "warning",
                     )
@@ -818,11 +793,14 @@ class WebPageFetcher:
                     result.status = "error"
                     result.error = str(e)
                     self.task_manager.update_task(
-                        task_url,
+                        url,
                         state=TaskState.FAILED,
                         progress=1.0,
                         message=f"Error: {str(e)}",
                         completed_at=time.time(),
+                    )
+                    self.task_manager.add_log(
+                        url, "Task failed after maximum retries", "error"
                     )
                     return result
 
@@ -830,6 +808,105 @@ class WebPageFetcher:
         if result.status == "unknown":
             result.status = "error"
         return result
+
+    def fetch_html(self, url: str) -> PageData | None:
+        """Fetch HTML content from a URL using DrissionPage
+
+        Args:
+            url: The URL to fetch
+        """
+        page = None
+        try:
+            # Create a fresh browser instance
+            page = self.setup_page()
+            if not page:
+                self.task_manager.add_log(url, "Failed to create browser", "error")
+                return None
+
+            self.task_manager.update_task(url, progress=10)
+            self.task_manager.add_log(url, f"Navigating to {url}...", "info")
+            page.get(url)
+            self.task_manager.update_task(url, progress=30)
+
+            # Wait for page to load using dynamic waiting strategy
+            self.task_manager.add_log(
+                url, "Waiting for page to fully render...", "info"
+            )
+            self.task_manager.update_task(url, progress=40)
+            try:
+                # Wait for document ready state to be complete
+                page.wait.doc_loaded(timeout=10)
+                self.task_manager.update_task(url, progress=60)
+            except Exception as e:
+                self.task_manager.add_log(
+                    url, f"Warning: Wait condition timed out: {e}", "warning"
+                )
+                self.task_manager.add_log(
+                    url,
+                    "Continuing with potentially incomplete page...",
+                    "warning",
+                )
+
+            # Get page source after JavaScript execution
+            html_content = page.html
+            self.task_manager.update_task(url, progress=70)
+
+            # Take a screenshot of the page
+            self.task_manager.add_log(url, "Taking screenshot...", "info")
+            screenshot_data = page.get_screenshot(as_bytes=True)
+            self.task_manager.update_task(url, progress=0.8)
+
+            # Additional page metadata
+            page_title = page.title
+            current_url = page.url  # In case of redirects
+            self.task_manager.update_task(url, progress=90)
+
+            page_data = PageData(
+                html=html_content,
+                title=page_title,
+                url=current_url,
+                screenshot=screenshot_data,
+            )
+
+            self.task_manager.update_task(url, progress=100)
+            return page_data
+        except Exception as e:
+            self.task_manager.add_log(url, f"Error fetching URL {url}: {e}", "error")
+            return None
+        finally:
+            # Always close the browser when done
+            if page:
+                try:
+                    page.quit()
+                except Exception:
+                    self.task_manager.add_log(
+                        url, "Warning: Failed to close browser properly", "warning"
+                    )
+
+    def analyze_and_save_content(
+        self, page_data: PageData, url: str
+    ) -> tuple[PageMetadata, str]:
+        """Analyze HTML and save files atomically with a single file ID
+
+        This method ensures that analysis and file saving use the same ID
+        to prevent race conditions in parallel processing.
+
+        Returns:
+            tuple: (metadata, file_id)
+        """
+        # Generate the file ID first, under the lock
+        file_id = self.get_next_id()
+
+        # Analyze HTML
+        metadata = self.analyze_html(page_data, file_id)
+
+        # Ensure the metadata uses our pre-generated ID
+        metadata.id = file_id
+
+        # Save files with this ID
+        self._save_files_internal(page_data, metadata, url)
+
+        return metadata, file_id
 
     # Process each URL in parallel
     def batch_process_urls(
@@ -904,42 +981,74 @@ class WebPageFetcher:
 
             # Process URLs in parallel with rich live display
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # Submit all tasks to the executor
-                futures = {
-                    executor.submit(self.process_single_url, url): url for url in urls
-                }
+                running_progress = Progress()
+                # Set up the live display
+                with Live(
+                    self._generate_live_display(running_progress), refresh_per_second=4
+                ) as live:
+                    # Add all tasks to the task manager
+                    for url in urls:
+                        self.task_manager.add_task(url)
 
-                # Create a live display for real-time updates
-                with Live(self._generate_live_display(), refresh_per_second=4) as live:
-                    for future in as_completed(futures):
-                        url = futures[future]
-                        try:
-                            result = future.result()
-                            results.entries.append(result)
+                    # Keep track of running futures
+                    futures = {}
+                    completed_urls = set()
 
-                            # Update statistics
-                            if result.status == "success" and result.is_new:
-                                results.successful += 1
-                                results.new_entries += 1
-                            elif result.status == "duplicate_url":
-                                results.successful += 1
-                                results.duplicate_urls += 1
-                            elif result.status == "duplicate_content":
-                                results.successful += 1
-                                results.duplicate_content += 1
-                            elif result.status in ["failed", "error"]:
+                    # Submit all tasks to the executor
+                    for url in urls:
+                        futures[executor.submit(self._process_single_url, url)] = url
+
+                    # Create a flag and function for the background updater
+                    update_display = True
+
+                    def ui_updater():
+                        while update_display:
+                            live.update(self._generate_live_display(running_progress))
+                            time.sleep(0.25)  # Update 4 times per second
+
+                    # Start background thread for UI updates
+                    updater_thread = threading.Thread(target=ui_updater)
+                    updater_thread.daemon = True
+                    updater_thread.start()
+
+                    try:
+                        # Process results as they complete
+                        for future in as_completed(futures):
+                            url = futures[future]
+                            completed_urls.add(url)
+
+                            try:
+                                result = future.result()
+                                results.entries.append(result)
+
+                                # Update statistics
+                                if result.status == "success" and result.is_new:
+                                    results.successful += 1
+                                    results.new_entries += 1
+                                elif result.status == "duplicate_url":
+                                    results.successful += 1
+                                    results.duplicate_urls += 1
+                                elif result.status == "duplicate_content":
+                                    results.successful += 1
+                                    results.duplicate_content += 1
+                                elif result.status in ["failed", "error"]:
+                                    results.failed += 1
+
+                            except Exception as e:
                                 results.failed += 1
+                                results.entries.append(
+                                    UrlProcessResult(
+                                        url=url, status="error", error=str(e)
+                                    )
+                                )
+                    finally:
+                        # Stop the background updater thread
+                        update_display = False
+                        if updater_thread.is_alive():
+                            updater_thread.join(timeout=1.0)
 
-                            # Update the live display
-                            live.update(self._generate_live_display())
-
-                        except Exception as e:
-                            results.failed += 1
-                            results.entries.append(
-                                UrlProcessResult(url=url, status="error", error=str(e))
-                            )
-                            # Update the live display
-                            live.update(self._generate_live_display())
+                        # Final update of the display
+                        live.update(self._generate_live_display(running_progress))
 
             # Print summary with rich tables
             from rich.table import Table
@@ -965,10 +1074,9 @@ class WebPageFetcher:
 
         return results
 
-    def _generate_live_display(self):
-        """Generate a rich layout for the live display"""
+    def _generate_live_display(self, running_progress: Progress):
+        """Generate a rich layout for the live display with a combined panel"""
         # Create the main layout
-        layout = Layout()
 
         # Get tasks in different states
         running_tasks = self.task_manager.get_tasks_by_state(TaskState.RUNNING)
@@ -976,7 +1084,7 @@ class WebPageFetcher:
         failed_tasks = self.task_manager.get_tasks_by_state(TaskState.FAILED)
         queued_tasks = self.task_manager.get_tasks_by_state(TaskState.QUEUED)
 
-        # Add overall stats
+        # Calculate stats
         all_tasks = self.task_manager.get_all_tasks()
         total = len(all_tasks)
         running = len(running_tasks)
@@ -984,159 +1092,71 @@ class WebPageFetcher:
         failed = len(failed_tasks)
         queued = len(queued_tasks)
 
-        stats_panel = Panel(
+        stats_line = (
             f"[bold]Total:[/bold] {total} | "
             f"[bold blue]Running:[/bold blue] {running} | "
             f"[bold green]Completed:[/bold green] {completed} | "
             f"[bold red]Failed:[/bold red] {failed} | "
-            f"[bold yellow]Queued:[/bold yellow] {queued}",
-            title="Processing Statistics",
-            border_style="cyan",
-            padding=(0, 1),
+            f"[bold yellow]Queued:[/bold yellow] {queued}"
         )
 
-        # Create progress bars for running tasks
         if running_tasks:
-            progress = Progress(
-                SpinnerColumn(),
-                TextColumn("[bold blue]{task.description}"),
-                BarColumn(bar_width=None),
-                TaskProgressColumn(),
-                TimeRemainingColumn(),
-            )
-
-            # Add a task for each running URL
-            task_ids = {}
             for task in running_tasks:
-                task_desc = f"{task.url}"
-                task_id = progress.add_task(
-                    task_desc, total=1.0, completed=task.progress
-                )
-                task_ids[task.url] = task_id
+                if task.progress_task_id is None:
+                    task_id = running_progress.add_task(
+                        f"[bold blue]{task.url}",
+                        completed=task.progress,
+                    )
+                    self.task_manager.update_task(task.url, progress_task_id=task_id)
+                else:
+                    running_progress.update(
+                        task.progress_task_id, completed=task.progress
+                    )
 
-            # Update progress for existing tasks
-            for url, task_id in task_ids.items():
-                task_info = self.task_manager.get_task(url)
-                if task_info:
-                    progress.update(task_id, completed=task_info.progress)
+        if completed_tasks:
+            for task in completed_tasks:
+                if task.progress_task_id is not None:
+                    running_progress.update(task.progress_task_id, visible=False)
 
-            running_panel = Panel(
-                progress,
-                title=f"Running Tasks ({len(running_tasks)})",
-                border_style="blue",
-                padding=(0, 1),
-            )
-        else:
-            running_panel = Panel(
-                "[dim]No tasks currently running[/dim]",
-                title="Running Tasks (0)",
-                border_style="blue",
-                padding=(0, 1),
-            )
+        if failed_tasks:
+            for task in failed_tasks:
+                if task.progress_task_id is not None:
+                    running_progress.update(task.progress_task_id, visible=False)
 
-        # Create a table for the most recently completed tasks (show last 5)
-        recent_completed = sorted(
-            completed_tasks + failed_tasks,
-            key=lambda t: t.completed_at or 0,
-            reverse=True,
-        )[:5]
-
-        if recent_completed:
-            completed_table = Table(
-                show_header=True, header_style="bold", box=None, padding=0
-            )
-            completed_table.add_column("URL", style="cyan", no_wrap=True)
-            completed_table.add_column(
-                "Status", style="green", justify="center", width=12
-            )
-            completed_table.add_column(
-                "File ID", style="cyan", justify="center", width=8
-            )
-            completed_table.add_column(
-                "Duration", style="cyan", justify="right", width=8
-            )
-
-            for task in recent_completed:
-                duration = "Unknown"
-                if task.started_at and task.completed_at:
-                    duration = f"{task.completed_at - task.started_at:.1f}s"
-
-                # Truncate long URLs
-                display_url = task.url
-                if len(display_url) > 50:
-                    display_url = display_url[:47] + "..."
-
-                status_style = "green" if task.state == TaskState.COMPLETE else "red"
-                status = (
-                    "✅ Complete" if task.state == TaskState.COMPLETE else "❌ Failed"
-                )
-
-                completed_table.add_row(
-                    display_url,
-                    f"[{status_style}]{status}[/{status_style}]",
-                    task.file_id or "N/A",
-                    duration,
-                )
-
-            completed_panel = Panel(
-                completed_table,
-                title=f"Recent Completed Tasks ({len(completed_tasks)} complete, {len(failed_tasks)} failed)",
-                border_style="green",
-                padding=(0, 1),
-            )
-        else:
-            completed_panel = Panel(
-                "[dim]No tasks completed yet[/dim]",
-                title="Recent Completed Tasks (0)",
-                border_style="green",
-                padding=(0, 1),
-            )
-
-        # Task details panel (most recent logs for running tasks)
-        if running_tasks:
-            # Get the first running task for detailed view
-            current_task = running_tasks[0]
-            logs = current_task.get_recent_logs(5)  # Show up to 5 recent logs
-
-            if logs:
-                log_text = "\n".join(logs)
-                logs_panel = Panel(
-                    log_text,
-                    title=f"Task Logs: {current_task.url}",
-                    border_style="yellow",
-                    padding=(0, 1),
-                )
-            else:
-                logs_panel = Panel(
-                    "[dim]No logs yet[/dim]",
-                    title=f"Task Logs: {current_task.url}",
-                    border_style="yellow",
-                    padding=(0, 1),
-                )
-        else:
-            logs_panel = Panel(
-                "[dim]No active tasks[/dim]",
-                title="Task Logs",
-                border_style="yellow",
-                padding=(0, 1),
-            )
-
-        # Arrange panels in the layout
-        layout.split(Layout(name="stats", size=3), Layout(name="main"))
-
-        layout["stats"].update(stats_panel)
-
-        layout["main"].split_column(
-            Layout(name="running", size=3),
-            Layout(name="completed", size=7),
-            Layout(name="logs", size=7),
+        return Group(
+            stats_line,
+            running_progress,
         )
 
-        layout["running"].update(running_panel)
-        layout["completed"].update(completed_panel)
-        layout["logs"].update(logs_panel)
+    @staticmethod
+    def setup_page():
+        """Set up and return a DrissionPage ChromiumPage instance"""
+        # Create options object with sensible defaults
+        options = ChromiumOptions()
 
-        return layout
+        # Set headless mode
+        options.headless()
+
+        # Set user agent
+        options.set_user_agent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        )
+
+        # Add browser arguments for stability
+        options.set_argument("--no-sandbox")
+        options.set_argument("--disable-dev-shm-usage")
+        options.set_argument("--disable-gpu")
+        options.set_argument("--window-size=1920,1080")
+        options.set_argument("--disable-extensions")
+
+        try:
+            # Create page with options
+            page = ChromiumPage(options)
+            return page
+        except Exception as e:
+            print(f"Failed to create browser: {e}")
+            print("Make sure Chrome and DrissionPage are installed properly.")
+            return None
 
 
 def main():
@@ -1178,12 +1198,16 @@ def main():
         default=4,
         help="Number of parallel workers for batch processing (default: 4)",
     )
+    parser.add_argument(
+        "--debug-logs",
+        action="store_true",
+        help="Enable detailed debug logs for each task",
+    )
 
     args = parser.parse_args()
     fetcher = WebPageFetcher(args.dir)
 
     # Display Rich banner
-    from rich.panel import Panel
 
     console.print(
         Panel.fit(
@@ -1193,6 +1217,15 @@ def main():
             border_style="green",
         )
     )
+
+    # Enable or disable verbose debug logging based on flag
+    if args.debug_logs:
+        console.print(
+            "[info]Debug logs enabled. Saving detailed logs to task_logs/[/info]"
+        )
+    else:
+        # When not debugging, don't save logs to files
+        fetcher.task_manager.logs_dir = None
 
     # Handle list-hashes command
     if args.list_hashes:
