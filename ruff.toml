@@ -1,0 +1,14 @@
+[lint]
+select = ["E", "F", "I", "W"]  # Error, Flake8, Import, Warning
+ignore = ["E501"]  # Ignore line length
+
+[format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+[lint.isort]
+known-first-party = ["auto_test_ui"]
+
+[lint.per-file-ignores]
+"__init__.py" = ["F401"]  # Ignore unused imports in __init__.py files

@@ -1,0 +1,22 @@
+# Example URL list for batch processing with crawleval.fetch_webpage
+# Usage: python -m crawleval.fetch_webpage --batch example_urls.txt
+#
+# Format: One URL per line
+# - Empty lines are ignored
+# - Lines starting with # are treated as comments
+
+# Popular websites
+https://example.com
+https://wikipedia.org
+https://github.com
+
+# E-commerce sites
+# https://amazon.com
+# https://ebay.com
+
+# News sites
+https://news.ycombinator.com
+# https://cnn.com
+# https://bbc.com
+
+# Add your own URLs below 
