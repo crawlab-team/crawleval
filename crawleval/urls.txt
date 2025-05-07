@@ -1,0 +1,7 @@
+https://quotes.toscrape.com
+https://books.toscrape.com
+https://github.com/trending
+https://www.amazon.com/s?k=iphone
+https://www.amazon.com/soyizpo-I16-ProMax-Smartphone-Fingerprint/dp/B0DLX41W6M
+https://www.bbc.com/news/articles/cwy603eg0w8o
+https://huggingface.co/datasets
