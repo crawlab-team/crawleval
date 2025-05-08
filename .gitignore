@@ -173,5 +173,4 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
-eval_data_extract/task_logs
-eval_data_extract/screenshots
+eval_data_extract
