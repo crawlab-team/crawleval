@@ -1,0 +1,13 @@
+{
+  "id": "0004",
+  "name": "Amazon.com : iphone",
+  "description": "Content from www.amazon.com",
+  "url": "https://www.amazon.com/s?k=iphone",
+  "created_at": "2025-05-07T14:05:48.044272Z",
+  "size": 902610,
+  "dom_nodes": 4405,
+  "text_nodes": 3181,
+  "link_nodes": 426,
+  "image_nodes": 39,
+  "max_nesting_level": 37
+}

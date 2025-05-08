@@ -1,0 +1,13 @@
+{
+  "id": "0005",
+  "name": "TV | eBay",
+  "description": "Content from www.ebay.com",
+  "url": "https://www.ebay.com/b/TVs/11071/bn_738302",
+  "created_at": "2025-05-07T14:05:49.012718Z",
+  "size": 1940500,
+  "dom_nodes": 6862,
+  "text_nodes": 2787,
+  "link_nodes": 559,
+  "image_nodes": 99,
+  "max_nesting_level": 22
+}
