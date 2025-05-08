@@ -1,14 +1,3 @@
-{
-  "https://quotes.toscrape.com/": "0001",
-  "https://books.toscrape.com/": "0002",
-  "https://amazon.com/soyizpo-I16-ProMax-Smartphone-Fingerprint/dp/B0DLX41W6M": "0003",
-  "https://amazon.com/s?k=iphone": "0004",
-  "https://ebay.com/b/TVs/11071/bn_738302": "0005",
-  "https://ebay.com/b/TV-Video-Home-Audio-Electronics/32852/bn_1648392": "0006",
-  "https://detail.tmall.com/item.htm?id=727376248905&sku_properties=5919063%3A6536025": "0007",
-  "https://ebay.com/itm/135565215791": "0008",
-  "https://github.com/trending": "0009",
-  "https://huggingface.co/datasets": "0010",
-  "https://bbc.com/innovation/artificial-intelligence": "0011",
-  "https://bbc.com/news/articles/cwy603eg0w8o": "0012"
-}
+version https://git-lfs.github.com/spec/v1
+oid sha256:7505b442dac3f8e5dd0c80c6879d642ece5cd77b113e71ecf523e3834d620a7d
+size 698

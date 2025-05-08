@@ -1,13 +1,3 @@
-{
-  "id": "0008",
-  "name": "Samsung QLED Display 4K UltraHD Smart TV - Q60B | eBay",
-  "description": "Content from www.ebay.com",
-  "url": "https://www.ebay.com/itm/135565215791",
-  "created_at": "2025-05-07T14:05:55.838019Z",
-  "size": 1303997,
-  "dom_nodes": 1943,
-  "text_nodes": 409,
-  "link_nodes": 170,
-  "image_nodes": 52,
-  "max_nesting_level": 33
-}
+version https://git-lfs.github.com/spec/v1
+oid sha256:c462e820f63d65814cacc45f3eb15b60001d349b6de0d46d1949400023362fe1
+size 359
