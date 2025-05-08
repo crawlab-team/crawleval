@@ -1,0 +1,6 @@
+outs:
+- md5: 8cffca318dcdb8add1d42f59428ab0e4.dir
+  size: 14812934
+  nfiles: 38
+  hash: md5
+  path: eval_data_extract
