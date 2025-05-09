@@ -1,5 +1,7 @@
 # CrawlEval
 
+> **IMPORTANT**: Due to data size consideration, CrawlEval is moved to [HuggingFace](https://huggingface.co/datasets/crawlab/crawleval) to better collaboration and usability.
+
 Resources and tools for evaluating the performance and behavior of web crawling systems.
 
 ## Overview
